@@ -23,7 +23,15 @@ final class Migrator
                 continue;
             }
             $sql = (string) file_get_contents($path);
-            $this->pdo->beginTransaction();
+            // MySQL implicitly commits on DDL (CREATE/ALTER/DROP), so wrapping a
+            // migration in an explicit transaction is unsound — the first DDL
+            // ends the transaction silently and a later commit/rollBack then
+            // raises "no active transaction". Execute statements directly; the
+            // migrations are authored to be idempotent (CREATE TABLE IF NOT
+            // EXISTS, etc.) so partial failures are safe to retry. The
+            // schema_migrations row is only inserted after every statement
+            // succeeds, so a mid-file failure leaves the migration un-recorded
+            // and the next run picks up from the same file.
             try {
                 foreach ($this->splitStatements($sql) as $stmt) {
                     if (trim($stmt) === '') {
@@ -33,10 +41,8 @@ final class Migrator
                 }
                 $ins = $this->pdo->prepare('INSERT INTO schema_migrations(name, applied_at) VALUES(:n, NOW())');
                 $ins->execute(['n' => $name]);
-                $this->pdo->commit();
                 $ran[] = $name;
             } catch (\Throwable $e) {
-                $this->pdo->rollBack();
                 throw new \RuntimeException("migration {$name} failed: " . $e->getMessage(), 0, $e);
             }
         }
