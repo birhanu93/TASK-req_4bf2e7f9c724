@@ -1,0 +1,126 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use App\App\Kernel;
+use App\Persistence\Migrator;
+use App\Persistence\PdoDatabase;
+
+$argv = $_SERVER['argv'] ?? ['console'];
+$command = $argv[1] ?? 'help';
+
+function requirePdo(): \PDO
+{
+    $dsn = getenv('DB_DSN') ?: '';
+    if ($dsn === '') {
+        $host = getenv('DB_HOST') ?: '';
+        $name = getenv('DB_NAME') ?: '';
+        if ($host === '' || $name === '') {
+            fwrite(STDERR, "DB_DSN or DB_HOST+DB_NAME must be set\n");
+            exit(1);
+        }
+        $port = getenv('DB_PORT') ?: '';
+        $portFragment = $port !== '' ? ";port={$port}" : '';
+        $dsn = "mysql:host={$host}{$portFragment};dbname={$name};charset=utf8mb4";
+    }
+    $user = getenv('DB_USER') ?: 'root';
+    $pass = getenv('DB_PASS') ?: '';
+    // Go through the hardened factory so the console shares the retry +
+    // init-command semantics used by the HTTP entrypoint.
+    $db = PdoDatabase::fromDsn($dsn, $user, $pass);
+    $pdo = $db->pdo();
+    if (!$pdo instanceof \PDO) {
+        fwrite(STDERR, "unable to acquire PDO connection\n");
+        exit(1);
+    }
+    return $pdo;
+}
+
+switch ($command) {
+    case 'migrate':
+        $pdo = requirePdo();
+        $migrator = new Migrator($pdo, __DIR__ . '/../migrations');
+        $ran = $migrator->migrate();
+        if (count($ran) === 0) {
+            echo "No migrations to run.\n";
+        } else {
+            foreach ($ran as $name) {
+                echo "Applied {$name}\n";
+            }
+        }
+        break;
+
+    case 'snapshot:export':
+        $kernel = Kernel::fromEnv();
+        $result = $kernel->snapshotExporter->export();
+        echo "Snapshot written to {$result['path']}\n";
+        echo json_encode($result['manifest'], JSON_PRETTY_PRINT) . "\n";
+        break;
+
+    case 'tiering:run':
+        $kernel = Kernel::fromEnv();
+        $r = $kernel->tiering->tier();
+        echo "Moved: " . count($r['moved']) . ", kept: " . count($r['kept']) . "\n";
+        break;
+
+    case 'keys:rotate':
+        $kernel = Kernel::fromEnv();
+        $new = $kernel->keyring->rotate();
+        echo "New profile key version: {$new->getVersion()}\n";
+        break;
+
+    case 'maintain:partitions':
+        // Add the next 6 months of audit_log partitions if missing. Safe to
+        // run daily via cron.
+        $pdo = requirePdo();
+        $now = new \DateTimeImmutable();
+        for ($i = 0; $i < 6; $i++) {
+            $target = $now->modify("+{$i} months");
+            $name = 'p' . $target->format('Y_m');
+            $boundary = $target->modify('first day of next month')->format('Y-m-01');
+            $sql = "ALTER TABLE audit_log REORGANIZE PARTITION p_future INTO (
+                PARTITION {$name} VALUES LESS THAN ('{$boundary}'),
+                PARTITION p_future VALUES LESS THAN (MAXVALUE)
+            )";
+            try {
+                $pdo->exec($sql);
+                echo "Added {$name}\n";
+            } catch (\PDOException $e) {
+                if (str_contains($e->getMessage(), 'already exists') || str_contains($e->getMessage(), 'Duplicate')) {
+                    // Already created — fine.
+                    continue;
+                }
+                // Typically: REORGANIZE fails if target range overlaps, which
+                // means this partition was already added. Treat as idempotent.
+                if (str_contains($e->getMessage(), 'overlapping') || str_contains($e->getMessage(), 'same name')) {
+                    continue;
+                }
+                fwrite(STDERR, $e->getMessage() . "\n");
+            }
+        }
+        break;
+
+    case 'help':
+    default:
+        echo <<<HELP
+Workforce Hub console
+
+Commands:
+  migrate                Apply SQL migrations under migrations/ to the DB.
+  snapshot:export        Write a JSON snapshot of all entities.
+  tiering:run            Move old hot-storage files to cold storage.
+  keys:rotate            Rotate the profile encryption DEK (new version).
+  maintain:partitions    Add next 6 months of audit_log partitions.
+
+Environment:
+  DB_DSN | DB_HOST+DB_PORT+DB_NAME+DB_USER+DB_PASS   — MySQL connection
+  DB_CONNECT_RETRIES, DB_CONNECT_RETRY_MS            — boot-time retry policy
+  STORAGE_ROOT                                       — root directory for artefacts
+  KEK_PATH                                           — path to the 32-byte KEK file
+
+HELP;
+        break;
+}
