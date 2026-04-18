@@ -17,25 +17,6 @@ services:
     tmpfs:
       - /var/lib/mysql
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    environment:
-      DB_HOST: db
-      DB_USER: workforce
-      DB_PASS: workforce
-      DB_NAME: workforce
-      STORAGE_ROOT: /app/storage
-    depends_on:
-      db:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    command: ["php", "-S", "0.0.0.0:8080", "-t", "public", "public/index.php"]
-    volumes:
-      - ./storage:/app/storage
-
   migrate:
     build:
       context: .
@@ -49,8 +30,57 @@ services:
       db:
         condition: service_healthy
     command: ["php", "bin/console", "migrate"]
-    profiles:
-      - migrate
+    restart: "no"
+
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DB_HOST: db
+      DB_USER: workforce
+      DB_PASS: workforce
+      DB_NAME: workforce
+      STORAGE_ROOT: /app/storage
+      DEMO_PASSWORD: "Demo!pass-1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["php", "bin/console", "seed:demo"]
+    volumes:
+      - ./storage:/app/storage
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DB_HOST: db
+      DB_USER: workforce
+      DB_PASS: workforce
+      DB_NAME: workforce
+      STORAGE_ROOT: /app/storage
+      SESSION_COOKIE_SECURE: "false"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    command: ["php", "-S", "0.0.0.0:8080", "-t", "public", "public/index.php"]
+    volumes:
+      - ./storage:/app/storage
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    environment:
+      VITE_API_BASE: "http://app:8080"
+    depends_on:
+      - app
+    ports:
+      - "5173:5173"
 
   tests:
     build:

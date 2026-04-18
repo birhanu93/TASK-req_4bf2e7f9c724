@@ -103,6 +103,51 @@ switch ($command) {
         }
         break;
 
+    case 'seed:demo':
+        // One-shot demo seeding: bootstrap an admin, then register a user
+        // for each remaining role. Idempotent — re-running on an already
+        // seeded database skips existing users and reports them as present.
+        $kernel = Kernel::fromEnv();
+        $auth = $kernel->auth;
+        $users = $kernel->users;
+        $password = getenv('DEMO_PASSWORD') ?: 'Demo!pass-1';
+
+        $ensureAdmin = function () use ($auth, $users, $password): void {
+            if ($users->findByUsername('admin') !== null) {
+                echo "admin already exists — skipped bootstrap\n";
+                return;
+            }
+            try {
+                $auth->bootstrapAdmin('admin', $password);
+                echo "bootstrapped admin\n";
+            } catch (\Throwable $e) {
+                // If the one-shot marker was already claimed but no admin row
+                // exists we can't recover automatically. Surface clearly.
+                fwrite(STDERR, "bootstrap failed: {$e->getMessage()}\n");
+                exit(1);
+            }
+        };
+        $ensureAdmin();
+
+        $roleAccounts = [
+            'supervisor' => ['supervisor'],
+            'trainee' => ['trainee'],
+            'guardian' => ['guardian'],
+            'employer' => ['employer'],
+        ];
+        foreach ($roleAccounts as $username => $roles) {
+            if ($users->findByUsername($username) !== null) {
+                echo "{$username} already exists — skipped\n";
+                continue;
+            }
+            $auth->register($username, $password, $roles, 'seed');
+            echo "created {$username} ({$roles[0]})\n";
+        }
+
+        echo "\nDemo credentials (password: {$password}):\n";
+        echo "  admin / supervisor / trainee / guardian / employer\n";
+        break;
+
     case 'help':
     default:
         echo <<<HELP
@@ -110,6 +155,8 @@ Workforce Hub console
 
 Commands:
   migrate                Apply SQL migrations under migrations/ to the DB.
+  seed:demo              Bootstrap admin and register one user per role with
+                         password from DEMO_PASSWORD (default: Demo!pass-1).
   snapshot:export        Write a JSON snapshot of all entities.
   tiering:run            Move old hot-storage files to cold storage.
   keys:rotate            Rotate the profile encryption DEK (new version).
