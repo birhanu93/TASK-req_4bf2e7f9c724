@@ -27,6 +27,9 @@
         "sort-packages": true,
         "audit": {
             "ignore": ["PKSA-5jz8-6tcw-pbk4"]
+        },
+        "platform": {
+            "php": "8.2.0"
         }
     }
 }
